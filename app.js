@@ -1,4 +1,4 @@
-// Binance Futures Screener (динамическая подписка + real-time график)
+// Binance Futures Screener (динамическая подписка + real-time график + история до 1400 свечей)
 const BINANCE_WS = 'wss://fstream.binance.com/ws';
 const BINANCE_API = 'https://fapi.binance.com';
 
@@ -13,7 +13,7 @@ let sortDesc = true;
 let currentTimeframe = '15m';
 let lastSubscriptionSet = new Set();
 let currentKlineSymbol = null;
-let wsReady = false; // Флаг готовности WebSocket
+let wsReady = false;
 
 // Инициализация
 async function init() {
@@ -24,7 +24,7 @@ async function init() {
     loadChartData(currentSymbol);
 }
 
-// Загрузка списка фьючерсов (без CORS-прокси, как было изначально)
+// Загрузка списка фьючерсов
 async function loadCoins() {
     try {
         const exchangeInfoRes = await fetch(`${BINANCE_API}/fapi/v1/exchangeInfo`);
@@ -90,7 +90,7 @@ function initChart() {
 
 async function loadChartData(symbol) {
     try {
-        const res = await fetch(`${BINANCE_API}/fapi/v1/klines?symbol=${symbol}&interval=${currentTimeframe}&limit=200`);
+        const res = await fetch(`${BINANCE_API}/fapi/v1/klines?symbol=${symbol}&interval=${currentTimeframe}&limit=1400`);
         const klines = await res.json();
         const candles = klines.map(k => ({
             time: k[0] / 1000,
@@ -116,13 +116,13 @@ function connectWebSocket() {
     ws.onopen = () => {
         wsReady = true;
         updateConnectionStatus(true);
-        updateSubscriptions(); // подписываемся на видимые монеты
+        updateSubscriptions();
         if (currentSymbol) subscribeToKlineStream(currentSymbol);
     };
     
     ws.onmessage = (event) => {
         const msg = JSON.parse(event.data);
-        if (msg.id) return; // ответ на подписку
+        if (msg.id) return;
         if (msg.e === '24hrTicker') updateTicker(msg);
         else if (msg.e === 'kline') updateChartWithKline(msg);
     };
@@ -244,7 +244,7 @@ function applyFilters() {
     sortCoins();
     renderCoinsList();
     updateCoinsCount();
-    updateSubscriptions(); // переподписываемся при изменении фильтров
+    updateSubscriptions();
 }
 
 function sortBy(field) {
