@@ -1,4 +1,4 @@
-// Binance Futures Screener (без ATR)
+// Binance Futures Screener (с динамической подпиской и real-time графиком)
 const BINANCE_WS = 'wss://fstream.binance.com/ws';
 const BINANCE_API = 'https://fapi.binance.com';
 
@@ -12,6 +12,8 @@ let candleSeries = null;
 let sortField = 'change';
 let sortDesc = true;
 let currentTimeframe = '15m';
+let lastSubscriptionSet = new Set(); // Для отслеживания подписок на цены
+let currentKlineSymbol = null;       // Для отслеживания подписки на свечи
 
 // Инициализация
 async function init() {
@@ -22,7 +24,7 @@ async function init() {
     loadChartData(currentSymbol);
 }
 
-// Загрузка списка фьючерсов и 24h данных (без ATR)
+// Загрузка списка фьючерсов и 24h данных
 async function loadCoins() {
     try {
         // Получаем список всех фьючерсов
@@ -40,7 +42,7 @@ async function loadCoins() {
         const tickers = await tickersRes.json();
         const tickersMap = new Map(tickers.map(t => [t.symbol, t]));
 
-        // Заполняем Map монет (без расчёта ATR)
+        // Заполняем Map монет
         usdtPairs.forEach(pair => {
             const symbol = pair.symbol;
             const ticker = tickersMap.get(symbol);
@@ -129,35 +131,48 @@ async function loadChartData(symbol) {
         candleSeries.setData(candles);
         chart.timeScale().fitContent();
         
+        // Подписываемся на обновления свечей в реальном времени
+        subscribeToKlineStream(symbol);
         updateHeader(symbol);
     } catch (error) {
         console.error('Error loading chart data:', error);
     }
 }
 
-// WebSocket подключение
+// === WebSocket подключение ===
 function connectWebSocket() {
-    const streams = Array.from(coins.keys())
-        .map(s => s.toLowerCase() + '@ticker')
-        .slice(0, 100) // Binance лимит ~100 streams
-        .join('/');
-    
-    ws = new WebSocket(`${BINANCE_WS}/stream?streams=${streams}`);
+    ws = new WebSocket(BINANCE_WS);
     
     ws.onopen = () => {
         updateConnectionStatus(true);
+        // Подписываемся на первые видимые монеты
+        updateSubscriptions();
     };
     
     ws.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-        if (data.data) {
-            updateTicker(data.data);
+        const message = JSON.parse(event.data);
+        
+        // Обработка ответа на подписку/отписку
+        if (message.id) {
+            // Можно добавить логирование для отладки
+            // console.log('Subscription response:', message);
+            return;
+        }
+        
+        // Обработка данных потока
+        if (message.e === '24hrTicker') {
+            updateTicker(message);
+        } else if (message.e === 'kline') {
+            updateChartWithKline(message);
         }
     };
     
     ws.onclose = () => {
         updateConnectionStatus(false);
-        setTimeout(connectWebSocket, 5000); // Реконнект
+        lastSubscriptionSet.clear();
+        currentKlineSymbol = null;
+        // Реконнект через 5 секунд
+        setTimeout(connectWebSocket, 5000);
     };
     
     ws.onerror = (error) => {
@@ -166,7 +181,79 @@ function connectWebSocket() {
     };
 }
 
-// Обновление тикера из WebSocket
+// === Динамическое управление подписками ===
+function updateSubscriptions() {
+    if (ws.readyState !== WebSocket.OPEN) return;
+
+    // Определяем целевой набор символов для подписки (первые 50)
+    const targetSymbols = new Set(
+        filteredCoins.slice(0, 50).map(c => c.symbol.toLowerCase())
+    );
+    
+    // Находим, от каких символов нужно отписаться
+    const toUnsubscribe = [];
+    lastSubscriptionSet.forEach(symbol => {
+        if (!targetSymbols.has(symbol)) {
+            toUnsubscribe.push(`${symbol}@ticker`);
+        }
+    });
+    
+    // Находим, на какие символы нужно подписаться
+    const toSubscribe = [];
+    targetSymbols.forEach(symbol => {
+        if (!lastSubscriptionSet.has(symbol)) {
+            toSubscribe.push(`${symbol}@ticker`);
+        }
+    });
+
+    // Отправляем запросы на отписку/подписку
+    if (toUnsubscribe.length > 0) {
+        ws.send(JSON.stringify({
+            method: "UNSUBSCRIBE",
+            params: toUnsubscribe,
+            id: Date.now()
+        }));
+    }
+
+    if (toSubscribe.length > 0) {
+        ws.send(JSON.stringify({
+            method: "SUBSCRIBE",
+            params: toSubscribe,
+            id: Date.now() + 1
+        }));
+    }
+
+    // Обновляем сохранённый набор подписок
+    lastSubscriptionSet = targetSymbols;
+    
+    console.log(`Subscriptions updated. Active: ${targetSymbols.size}`);
+}
+
+function subscribeToKlineStream(symbol) {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    
+    // Отписываемся от предыдущего потока свечей, если он был
+    if (currentKlineSymbol && currentKlineSymbol !== symbol) {
+        const oldStream = `${currentKlineSymbol.toLowerCase()}@kline_${currentTimeframe}`;
+        ws.send(JSON.stringify({
+            method: "UNSUBSCRIBE",
+            params: [oldStream],
+            id: Date.now()
+        }));
+    }
+    
+    // Подписываемся на новый поток
+    const newStream = `${symbol.toLowerCase()}@kline_${currentTimeframe}`;
+    ws.send(JSON.stringify({
+        method: "SUBSCRIBE",
+        params: [newStream],
+        id: Date.now() + 1
+    }));
+    
+    currentKlineSymbol = symbol;
+}
+
+// === Обработка входящих данных WebSocket ===
 function updateTicker(data) {
     const symbol = data.s.toUpperCase();
     const coin = coins.get(symbol);
@@ -179,7 +266,7 @@ function updateTicker(data) {
             updateHeader(symbol);
         }
         
-        // Обновляем отображение если монета в отфильтрованном списке
+        // Обновляем отображение, если монета в отфильтрованном списке
         const index = filteredCoins.findIndex(c => c.symbol === symbol);
         if (index !== -1) {
             updateCoinRow(coin);
@@ -187,7 +274,28 @@ function updateTicker(data) {
     }
 }
 
-// Обновление заголовка
+function updateChartWithKline(data) {
+    const kline = data.k;
+    const isCandleClosed = kline.x; // true, если свеча закрыта
+    
+    const candleData = {
+        time: kline.t / 1000,
+        open: parseFloat(kline.o),
+        high: parseFloat(kline.h),
+        low: parseFloat(kline.l),
+        close: parseFloat(kline.c)
+    };
+
+    if (isCandleClosed) {
+        // Закрытая свеча — добавляем как новую
+        candleSeries.update(candleData);
+    } else {
+        // Текущая (незакрытая) свеча — обновляем существующую
+        candleSeries.update(candleData);
+    }
+}
+
+// === Обновление UI ===
 function updateHeader(symbol) {
     const coin = coins.get(symbol);
     if (!coin) return;
@@ -208,7 +316,7 @@ function formatPrice(price) {
     return price.toFixed(6);
 }
 
-// Фильтры
+// === Фильтры ===
 function setupFilters() {
     const filters = ['searchFilter', 'changeMin', 'changeMax'];
     filters.forEach(id => {
@@ -246,9 +354,12 @@ function applyFilters() {
     sortCoins();
     renderCoinsList();
     updateCoinsCount();
+    
+    // Переподписываемся на видимые монеты
+    updateSubscriptions();
 }
 
-// Сортировка
+// === Сортировка ===
 function sortBy(field) {
     if (sortField === field) {
         sortDesc = !sortDesc;
@@ -276,7 +387,7 @@ function sortCoins() {
     });
 }
 
-// Рендер списка
+// === Рендер списка монет ===
 function renderCoinsList() {
     const container = document.getElementById('coinsList');
     container.innerHTML = '';
@@ -317,7 +428,7 @@ function updateCoinRow(coin) {
     }
 }
 
-// Выбор монеты
+// === Выбор монеты ===
 function selectCoin(symbol) {
     currentSymbol = symbol;
     
@@ -340,7 +451,7 @@ function updateConnectionStatus(connected) {
     el.className = 'connection-status ' + (connected ? 'status-connected' : 'status-disconnected');
 }
 
-// Смена таймфрейма
+// === Смена таймфрейма ===
 function setTimeframe(tf) {
     currentTimeframe = tf;
     
@@ -352,7 +463,7 @@ function setTimeframe(tf) {
     // Показываем индикатор загрузки
     document.getElementById('currentSymbol').textContent = currentSymbol + ' (' + tf + ')';
     
-    // Перезагружаем график
+    // Перезагружаем график и переподписываемся на свечи
     loadChartData(currentSymbol);
 }
 
