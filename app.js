@@ -1,10 +1,9 @@
-// Binance Futures Screener (с динамической подпиской и real-time графиком)
+// Binance Futures Screener (динамическая подписка + real-time график)
 const BINANCE_WS = 'wss://fstream.binance.com/ws';
 const BINANCE_API = 'https://fapi.binance.com';
 
-// Состояние
-let coins = new Map();                // Все монеты
-let filteredCoins = [];              // Отфильтрованные
+let coins = new Map();
+let filteredCoins = [];
 let currentSymbol = 'BTCUSDT';
 let ws = null;
 let chart = null;
@@ -12,8 +11,9 @@ let candleSeries = null;
 let sortField = 'change';
 let sortDesc = true;
 let currentTimeframe = '15m';
-let lastSubscriptionSet = new Set(); // Для отслеживания подписок на цены
-let currentKlineSymbol = null;       // Для отслеживания подписки на свечи
+let lastSubscriptionSet = new Set();
+let currentKlineSymbol = null;
+let wsReady = false; // Флаг готовности WebSocket
 
 // Инициализация
 async function init() {
@@ -24,25 +24,22 @@ async function init() {
     loadChartData(currentSymbol);
 }
 
-// Загрузка списка фьючерсов и 24h данных
+// Загрузка списка фьючерсов (без CORS-прокси, как было изначально)
 async function loadCoins() {
     try {
-        // Получаем список всех фьючерсов
-        const response = await fetch(`${BINANCE_API}/fapi/v1/exchangeInfo`);
-        const data = await response.json();
+        const exchangeInfoRes = await fetch(`${BINANCE_API}/fapi/v1/exchangeInfo`);
+        const exchangeData = await exchangeInfoRes.json();
         
-        const usdtPairs = data.symbols.filter(s => 
+        const usdtPairs = exchangeData.symbols.filter(s => 
             s.quoteAsset === 'USDT' && 
             s.status === 'TRADING' &&
             s.contractType === 'PERPETUAL'
         );
 
-        // Загружаем 24h тикеры для изменений
         const tickersRes = await fetch(`${BINANCE_API}/fapi/v1/ticker/24hr`);
         const tickers = await tickersRes.json();
         const tickersMap = new Map(tickers.map(t => [t.symbol, t]));
 
-        // Заполняем Map монет
         usdtPairs.forEach(pair => {
             const symbol = pair.symbol;
             const ticker = tickersMap.get(symbol);
@@ -63,63 +60,38 @@ async function loadCoins() {
         updateCoinsCount();
         
     } catch (error) {
-        console.error('Error loading coins:', error);
+        console.error('Ошибка загрузки монет:', error);
         document.getElementById('coinsList').innerHTML = 
             '<div class="loading">Ошибка загрузки</div>';
     }
 }
 
-// Инициализация графика
+// График
 function initChart() {
-    const chartContainer = document.getElementById('chart');
-    
-    chart = LightweightCharts.createChart(chartContainer, {
-        layout: {
-            background: { color: '#0b0e11' },
-            textColor: '#d1d4dc',
-        },
-        grid: {
-            vertLines: { color: '#1e2329' },
-            horzLines: { color: '#1e2329' },
-        },
-        crosshair: {
-            mode: LightweightCharts.CrosshairMode.Normal,
-        },
-        rightPriceScale: {
-            borderColor: '#1e2329',
-        },
-        timeScale: {
-            borderColor: '#1e2329',
-            timeVisible: true,
-        },
+    const container = document.getElementById('chart');
+    chart = LightweightCharts.createChart(container, {
+        layout: { background: { color: '#0b0e11' }, textColor: '#d1d4dc' },
+        grid: { vertLines: { color: '#1e2329' }, horzLines: { color: '#1e2329' } },
+        crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+        rightPriceScale: { borderColor: '#1e2329' },
+        timeScale: { borderColor: '#1e2329', timeVisible: true },
     });
 
     candleSeries = chart.addCandlestickSeries({
-        upColor: '#0ecb81',
-        downColor: '#f6465d',
-        borderUpColor: '#0ecb81',
-        borderDownColor: '#f6465d',
-        wickUpColor: '#0ecb81',
-        wickDownColor: '#f6465d',
+        upColor: '#0ecb81', downColor: '#f6465d',
+        borderUpColor: '#0ecb81', borderDownColor: '#f6465d',
+        wickUpColor: '#0ecb81', wickDownColor: '#f6465d',
     });
 
-    // Ресайз
     window.addEventListener('resize', () => {
-        chart.applyOptions({
-            width: chartContainer.clientWidth,
-            height: chartContainer.clientHeight,
-        });
+        chart.applyOptions({ width: container.clientWidth, height: container.clientHeight });
     });
 }
 
-// Загрузка данных для графика
 async function loadChartData(symbol) {
     try {
-        const response = await fetch(
-            `${BINANCE_API}/fapi/v1/klines?symbol=${symbol}&interval=${currentTimeframe}&limit=200`
-        );
-        const klines = await response.json();
-        
+        const res = await fetch(`${BINANCE_API}/fapi/v1/klines?symbol=${symbol}&interval=${currentTimeframe}&limit=200`);
+        const klines = await res.json();
         const candles = klines.map(k => ({
             time: k[0] / 1000,
             open: parseFloat(k[1]),
@@ -127,275 +99,175 @@ async function loadChartData(symbol) {
             low: parseFloat(k[3]),
             close: parseFloat(k[4]),
         }));
-
         candleSeries.setData(candles);
         chart.timeScale().fitContent();
         
-        // Подписываемся на обновления свечей в реальном времени
-        subscribeToKlineStream(symbol);
+        if (wsReady) subscribeToKlineStream(symbol);
         updateHeader(symbol);
-    } catch (error) {
-        console.error('Error loading chart data:', error);
+    } catch (e) {
+        console.error('Ошибка загрузки графика:', e);
     }
 }
 
-// === WebSocket подключение ===
+// WebSocket
 function connectWebSocket() {
     ws = new WebSocket(BINANCE_WS);
     
     ws.onopen = () => {
+        wsReady = true;
         updateConnectionStatus(true);
-        // Подписываемся на первые видимые монеты
-        updateSubscriptions();
+        updateSubscriptions(); // подписываемся на видимые монеты
+        if (currentSymbol) subscribeToKlineStream(currentSymbol);
     };
     
     ws.onmessage = (event) => {
-        const message = JSON.parse(event.data);
-        
-        // Обработка ответа на подписку/отписку
-        if (message.id) {
-            // Можно добавить логирование для отладки
-            // console.log('Subscription response:', message);
-            return;
-        }
-        
-        // Обработка данных потока
-        if (message.e === '24hrTicker') {
-            updateTicker(message);
-        } else if (message.e === 'kline') {
-            updateChartWithKline(message);
-        }
+        const msg = JSON.parse(event.data);
+        if (msg.id) return; // ответ на подписку
+        if (msg.e === '24hrTicker') updateTicker(msg);
+        else if (msg.e === 'kline') updateChartWithKline(msg);
     };
     
     ws.onclose = () => {
+        wsReady = false;
         updateConnectionStatus(false);
         lastSubscriptionSet.clear();
         currentKlineSymbol = null;
-        // Реконнект через 5 секунд
         setTimeout(connectWebSocket, 5000);
     };
     
-    ws.onerror = (error) => {
-        console.error('WebSocket error:', error);
+    ws.onerror = (e) => {
+        console.error('WS error:', e);
         updateConnectionStatus(false);
     };
 }
 
-// === Динамическое управление подписками ===
 function updateSubscriptions() {
-    if (ws.readyState !== WebSocket.OPEN) return;
-
-    // Определяем целевой набор символов для подписки (первые 50)
-    const targetSymbols = new Set(
-        filteredCoins.slice(0, 50).map(c => c.symbol.toLowerCase())
-    );
+    if (!wsReady || ws.readyState !== WebSocket.OPEN) return;
     
-    // Находим, от каких символов нужно отписаться
-    const toUnsubscribe = [];
-    lastSubscriptionSet.forEach(symbol => {
-        if (!targetSymbols.has(symbol)) {
-            toUnsubscribe.push(`${symbol}@ticker`);
-        }
-    });
+    const target = new Set(filteredCoins.slice(0, 50).map(c => c.symbol.toLowerCase()));
+    const toUnsub = [];
+    const toSub = [];
     
-    // Находим, на какие символы нужно подписаться
-    const toSubscribe = [];
-    targetSymbols.forEach(symbol => {
-        if (!lastSubscriptionSet.has(symbol)) {
-            toSubscribe.push(`${symbol}@ticker`);
-        }
-    });
-
-    // Отправляем запросы на отписку/подписку
-    if (toUnsubscribe.length > 0) {
-        ws.send(JSON.stringify({
-            method: "UNSUBSCRIBE",
-            params: toUnsubscribe,
-            id: Date.now()
-        }));
-    }
-
-    if (toSubscribe.length > 0) {
-        ws.send(JSON.stringify({
-            method: "SUBSCRIBE",
-            params: toSubscribe,
-            id: Date.now() + 1
-        }));
-    }
-
-    // Обновляем сохранённый набор подписок
-    lastSubscriptionSet = targetSymbols;
+    lastSubscriptionSet.forEach(sym => { if (!target.has(sym)) toUnsub.push(`${sym}@ticker`); });
+    target.forEach(sym => { if (!lastSubscriptionSet.has(sym)) toSub.push(`${sym}@ticker`); });
     
-    console.log(`Subscriptions updated. Active: ${targetSymbols.size}`);
+    if (toUnsub.length) ws.send(JSON.stringify({ method: 'UNSUBSCRIBE', params: toUnsub, id: Date.now() }));
+    if (toSub.length) ws.send(JSON.stringify({ method: 'SUBSCRIBE', params: toSub, id: Date.now()+1 }));
+    
+    lastSubscriptionSet = target;
 }
 
 function subscribeToKlineStream(symbol) {
-    if (ws.readyState !== WebSocket.OPEN) return;
+    if (!wsReady || ws.readyState !== WebSocket.OPEN) return;
     
-    // Отписываемся от предыдущего потока свечей, если он был
     if (currentKlineSymbol && currentKlineSymbol !== symbol) {
-        const oldStream = `${currentKlineSymbol.toLowerCase()}@kline_${currentTimeframe}`;
         ws.send(JSON.stringify({
-            method: "UNSUBSCRIBE",
-            params: [oldStream],
+            method: 'UNSUBSCRIBE',
+            params: [`${currentKlineSymbol.toLowerCase()}@kline_${currentTimeframe}`],
             id: Date.now()
         }));
     }
-    
-    // Подписываемся на новый поток
-    const newStream = `${symbol.toLowerCase()}@kline_${currentTimeframe}`;
     ws.send(JSON.stringify({
-        method: "SUBSCRIBE",
-        params: [newStream],
-        id: Date.now() + 1
+        method: 'SUBSCRIBE',
+        params: [`${symbol.toLowerCase()}@kline_${currentTimeframe}`],
+        id: Date.now()+1
     }));
-    
     currentKlineSymbol = symbol;
 }
 
-// === Обработка входящих данных WebSocket ===
 function updateTicker(data) {
     const symbol = data.s.toUpperCase();
     const coin = coins.get(symbol);
+    if (!coin) return;
     
-    if (coin) {
-        coin.price = parseFloat(data.c);
-        coin.change = parseFloat(data.P);
-        
-        if (symbol === currentSymbol) {
-            updateHeader(symbol);
-        }
-        
-        // Обновляем отображение, если монета в отфильтрованном списке
-        const index = filteredCoins.findIndex(c => c.symbol === symbol);
-        if (index !== -1) {
-            updateCoinRow(coin);
-        }
-    }
+    coin.price = parseFloat(data.c);
+    coin.change = parseFloat(data.P);
+    
+    if (symbol === currentSymbol) updateHeader(symbol);
+    
+    const idx = filteredCoins.findIndex(c => c.symbol === symbol);
+    if (idx !== -1) updateCoinRow(coin);
 }
 
 function updateChartWithKline(data) {
-    const kline = data.k;
-    const isCandleClosed = kline.x; // true, если свеча закрыта
-    
-    const candleData = {
-        time: kline.t / 1000,
-        open: parseFloat(kline.o),
-        high: parseFloat(kline.h),
-        low: parseFloat(kline.l),
-        close: parseFloat(kline.c)
+    const k = data.k;
+    const candle = {
+        time: k.t / 1000,
+        open: parseFloat(k.o),
+        high: parseFloat(k.h),
+        low: parseFloat(k.l),
+        close: parseFloat(k.c)
     };
-
-    if (isCandleClosed) {
-        // Закрытая свеча — добавляем как новую
-        candleSeries.update(candleData);
-    } else {
-        // Текущая (незакрытая) свеча — обновляем существующую
-        candleSeries.update(candleData);
-    }
+    candleSeries.update(candle);
 }
 
-// === Обновление UI ===
+// UI
 function updateHeader(symbol) {
     const coin = coins.get(symbol);
     if (!coin) return;
-    
     document.getElementById('currentSymbol').textContent = symbol + ' (' + currentTimeframe + ')';
     document.getElementById('currentPrice').textContent = formatPrice(coin.price);
-    
-    const changeEl = document.getElementById('currentChange');
+    const ch = document.getElementById('currentChange');
     const change = coin.change;
-    changeEl.textContent = (change >= 0 ? '+' : '') + change.toFixed(2) + '%';
-    changeEl.className = 'symbol-change ' + (change >= 0 ? 'positive' : 'negative');
+    ch.textContent = (change >= 0 ? '+' : '') + change.toFixed(2) + '%';
+    ch.className = 'symbol-change ' + (change >= 0 ? 'positive' : 'negative');
 }
 
-// Форматирование цены
-function formatPrice(price) {
-    if (price >= 1000) return price.toFixed(2);
-    if (price >= 1) return price.toFixed(4);
-    return price.toFixed(6);
+function formatPrice(p) {
+    if (p >= 1000) return p.toFixed(2);
+    if (p >= 1) return p.toFixed(4);
+    return p.toFixed(6);
 }
 
-// === Фильтры ===
+// Фильтры и сортировка
 function setupFilters() {
-    const filters = ['searchFilter', 'changeMin', 'changeMax'];
-    filters.forEach(id => {
+    ['searchFilter', 'changeMin', 'changeMax'].forEach(id => {
         document.getElementById(id).addEventListener('input', applyFilters);
     });
-    
-    // Обработчики для кнопок таймфрейма
     document.querySelectorAll('.tf-btn').forEach(btn => {
-        btn.addEventListener('click', () => {
-            const tf = btn.dataset.tf;
-            setTimeframe(tf);
-        });
+        btn.addEventListener('click', () => setTimeframe(btn.dataset.tf));
     });
-    
-    // Обработчики для заголовков сортировки
     document.querySelectorAll('#listHeader span').forEach(span => {
-        span.addEventListener('click', () => {
-            const field = span.dataset.sort;
-            sortBy(field);
-        });
+        span.addEventListener('click', () => sortBy(span.dataset.sort));
     });
 }
 
 function applyFilters() {
     const search = document.getElementById('searchFilter').value.toUpperCase();
-    const changeMin = parseFloat(document.getElementById('changeMin').value) || -Infinity;
-    const changeMax = parseFloat(document.getElementById('changeMax').value) || Infinity;
+    const min = parseFloat(document.getElementById('changeMin').value) || -Infinity;
+    const max = parseFloat(document.getElementById('changeMax').value) || Infinity;
     
-    filteredCoins = Array.from(coins.values()).filter(coin => {
-        const matchSearch = coin.symbol.includes(search);
-        const matchChange = coin.change >= changeMin && coin.change <= changeMax;
-        return matchSearch && matchChange;
-    });
+    filteredCoins = Array.from(coins.values()).filter(c => 
+        c.symbol.includes(search) && c.change >= min && c.change <= max
+    );
     
     sortCoins();
     renderCoinsList();
     updateCoinsCount();
-    
-    // Переподписываемся на видимые монеты
-    updateSubscriptions();
+    updateSubscriptions(); // переподписываемся при изменении фильтров
 }
 
-// === Сортировка ===
 function sortBy(field) {
-    if (sortField === field) {
-        sortDesc = !sortDesc;
-    } else {
-        sortField = field;
-        sortDesc = true;
-    }
+    if (sortField === field) sortDesc = !sortDesc;
+    else { sortField = field; sortDesc = true; }
     sortCoins();
     renderCoinsList();
 }
 
 function sortCoins() {
     filteredCoins.sort((a, b) => {
-        let valA = a[sortField];
-        let valB = b[sortField];
-        
-        if (typeof valA === 'string') {
-            valA = valA.toLowerCase();
-            valB = valB.toLowerCase();
-        }
-        
-        if (valA < valB) return sortDesc ? 1 : -1;
-        if (valA > valB) return sortDesc ? -1 : 1;
+        let va = a[sortField], vb = b[sortField];
+        if (typeof va === 'string') { va = va.toLowerCase(); vb = vb.toLowerCase(); }
+        if (va < vb) return sortDesc ? 1 : -1;
+        if (va > vb) return sortDesc ? -1 : 1;
         return 0;
     });
 }
 
-// === Рендер списка монет ===
 function renderCoinsList() {
     const container = document.getElementById('coinsList');
     container.innerHTML = '';
-    
-    filteredCoins.forEach(coin => {
-        const row = createCoinRow(coin);
-        container.appendChild(row);
-    });
+    filteredCoins.forEach(c => container.appendChild(createCoinRow(c)));
 }
 
 function createCoinRow(coin) {
@@ -403,40 +275,30 @@ function createCoinRow(coin) {
     div.className = 'coin-item' + (coin.symbol === currentSymbol ? ' active' : '');
     div.dataset.symbol = coin.symbol;
     div.onclick = () => selectCoin(coin.symbol);
-    
     const changeClass = coin.change >= 0 ? 'positive' : 'negative';
-    const changeSign = coin.change >= 0 ? '+' : '';
-    
+    const sign = coin.change >= 0 ? '+' : '';
     div.innerHTML = `
         <span class="coin-symbol">${coin.symbol.replace('USDT', '')}</span>
         <span class="coin-price">${formatPrice(coin.price)}</span>
-        <span class="coin-change ${changeClass}">${changeSign}${coin.change.toFixed(2)}%</span>
+        <span class="coin-change ${changeClass}">${sign}${coin.change.toFixed(2)}%</span>
     `;
-    
     return div;
 }
 
 function updateCoinRow(coin) {
     const row = document.querySelector(`.coin-item[data-symbol="${coin.symbol}"]`);
-    if (row) {
-        const changeClass = coin.change >= 0 ? 'positive' : 'negative';
-        const changeSign = coin.change >= 0 ? '+' : '';
-        
-        row.children[1].textContent = formatPrice(coin.price);
-        row.children[2].textContent = `${changeSign}${coin.change.toFixed(2)}%`;
-        row.children[2].className = `coin-change ${changeClass}`;
-    }
+    if (!row) return;
+    const sign = coin.change >= 0 ? '+' : '';
+    row.children[1].textContent = formatPrice(coin.price);
+    row.children[2].textContent = `${sign}${coin.change.toFixed(2)}%`;
+    row.children[2].className = `coin-change ${coin.change >= 0 ? 'positive' : 'negative'}`;
 }
 
-// === Выбор монеты ===
 function selectCoin(symbol) {
     currentSymbol = symbol;
-    
-    // Обновляем активный класс
     document.querySelectorAll('.coin-item').forEach(el => {
         el.classList.toggle('active', el.dataset.symbol === symbol);
     });
-    
     loadChartData(symbol);
     updateHeader(symbol);
 }
@@ -445,25 +307,18 @@ function updateCoinsCount() {
     document.getElementById('coinsCount').textContent = filteredCoins.length;
 }
 
-function updateConnectionStatus(connected) {
+function updateConnectionStatus(ok) {
     const el = document.getElementById('connStatus');
-    el.textContent = connected ? 'Connected' : 'Disconnected';
-    el.className = 'connection-status ' + (connected ? 'status-connected' : 'status-disconnected');
+    el.textContent = ok ? 'Connected' : 'Disconnected';
+    el.className = 'connection-status ' + (ok ? 'status-connected' : 'status-disconnected');
 }
 
-// === Смена таймфрейма ===
 function setTimeframe(tf) {
     currentTimeframe = tf;
-    
-    // Обновляем активную кнопку
     document.querySelectorAll('.tf-btn').forEach(btn => {
         btn.classList.toggle('active', btn.dataset.tf === tf);
     });
-    
-    // Показываем индикатор загрузки
     document.getElementById('currentSymbol').textContent = currentSymbol + ' (' + tf + ')';
-    
-    // Перезагружаем график и переподписываемся на свечи
     loadChartData(currentSymbol);
 }
 
