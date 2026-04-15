@@ -264,6 +264,28 @@
             color: #0b0e11;
             font-weight: 600;
         }
+        
+        #loadMoreBtn {
+            margin-left: 8px;
+            background: #0b0e11;
+            border: 1px solid #1e2329;
+            color: #848e9c;
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        
+        #loadMoreBtn:hover {
+            border-color: #2b3139;
+            color: #d1d4dc;
+        }
+        
+        #loadMoreBtn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
     </style>
 </head>
 <body>
@@ -283,6 +305,7 @@
                     <button class="tf-btn" data-tf="30m">30м</button>
                     <button class="tf-btn" data-tf="1h">1ч</button>
                     <button class="tf-btn" data-tf="4h">4ч</button>
+                    <button id="loadMoreBtn" title="Загрузить ещё историю">📜 Ещё</button>
                 </div>
                 <span class="connection-status status-disconnected" id="connStatus">Disconnected</span>
             </div>
