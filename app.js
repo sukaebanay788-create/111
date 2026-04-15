@@ -1,4 +1,4 @@
-// Binance Futures Screener (динамическая подписка + real-time график + история до 1400 свечей)
+// Binance Futures Screener (с кнопкой подгрузки истории)
 const BINANCE_WS = 'wss://fstream.binance.com/ws';
 const BINANCE_API = 'https://fapi.binance.com';
 
@@ -14,6 +14,11 @@ let currentTimeframe = '15m';
 let lastSubscriptionSet = new Set();
 let currentKlineSymbol = null;
 let wsReady = false;
+
+// Для истории
+let currentCandles = [];
+let oldestTime = null;
+let isLoadingMore = false;
 
 // Инициализация
 async function init() {
@@ -88,24 +93,76 @@ function initChart() {
     });
 }
 
+// Первичная загрузка свечей (1400)
 async function loadChartData(symbol) {
     try {
-        const res = await fetch(`${BINANCE_API}/fapi/v1/klines?symbol=${symbol}&interval=${currentTimeframe}&limit=1400`);
+        const res = await fetch(
+            `${BINANCE_API}/fapi/v1/klines?symbol=${symbol}&interval=${currentTimeframe}&limit=1400`
+        );
         const klines = await res.json();
-        const candles = klines.map(k => ({
+        
+        currentCandles = klines.map(k => ({
             time: k[0] / 1000,
             open: parseFloat(k[1]),
             high: parseFloat(k[2]),
             low: parseFloat(k[3]),
             close: parseFloat(k[4]),
         }));
-        candleSeries.setData(candles);
+        
+        oldestTime = klines.length > 0 ? klines[0][0] : null;
+        
+        candleSeries.setData(currentCandles);
         chart.timeScale().fitContent();
         
         if (wsReady) subscribeToKlineStream(symbol);
         updateHeader(symbol);
     } catch (e) {
         console.error('Ошибка загрузки графика:', e);
+    }
+}
+
+// Подгрузка более старых свечей
+async function loadMoreHistory() {
+    if (isLoadingMore || !oldestTime) return;
+    isLoadingMore = true;
+    
+    const btn = document.getElementById('loadMoreBtn');
+    btn.textContent = '⏳';
+    btn.disabled = true;
+    
+    try {
+        const endTime = oldestTime - 1;
+        const res = await fetch(
+            `${BINANCE_API}/fapi/v1/klines?symbol=${currentSymbol}&interval=${currentTimeframe}&limit=1000&endTime=${endTime}`
+        );
+        const klines = await res.json();
+        
+        if (klines.length === 0) {
+            console.log('Больше истории нет');
+            btn.textContent = '📜';
+            btn.disabled = false;
+            isLoadingMore = false;
+            return;
+        }
+        
+        const newCandles = klines.map(k => ({
+            time: k[0] / 1000,
+            open: parseFloat(k[1]),
+            high: parseFloat(k[2]),
+            low: parseFloat(k[3]),
+            close: parseFloat(k[4]),
+        }));
+        
+        oldestTime = klines[0][0];
+        currentCandles = [...newCandles, ...currentCandles];
+        candleSeries.setData(currentCandles);
+        
+    } catch (e) {
+        console.error('Ошибка подгрузки истории:', e);
+    } finally {
+        btn.textContent = '📜';
+        btn.disabled = false;
+        isLoadingMore = false;
     }
 }
 
@@ -230,6 +287,7 @@ function setupFilters() {
     document.querySelectorAll('#listHeader span').forEach(span => {
         span.addEventListener('click', () => sortBy(span.dataset.sort));
     });
+    document.getElementById('loadMoreBtn').addEventListener('click', loadMoreHistory);
 }
 
 function applyFilters() {
