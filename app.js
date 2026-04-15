@@ -1,4 +1,4 @@
-// Binance Futures Screener (с EMA 65, 125, 450)
+// Binance Futures Screener (с EMA 65, 125, 450 без маркеров)
 const BINANCE_WS = 'wss://fstream.binance.com/ws';
 const BINANCE_API = 'https://fapi.binance.com';
 
@@ -91,28 +91,34 @@ function initChart() {
         wickUpColor: '#0ecb81', wickDownColor: '#f6465d',
     });
 
-    // EMA 65 (светло-серый)
+    // EMA 65 (светло-серый, без маркеров)
     ema65Series = chart.addLineSeries({
         color: '#a0a4ab',
         lineWidth: 1,
         priceLineVisible: false,
         lastValueVisible: false,
+        crosshairMarkerVisible: false,
+        autoscaleInfoProvider: () => null,
     });
 
-    // EMA 125 (светло-серый)
+    // EMA 125 (светло-серый, без маркеров)
     ema125Series = chart.addLineSeries({
         color: '#a0a4ab',
         lineWidth: 1,
         priceLineVisible: false,
         lastValueVisible: false,
+        crosshairMarkerVisible: false,
+        autoscaleInfoProvider: () => null,
     });
 
-    // EMA 450 (почти белый, толще)
+    // EMA 450 (почти белый, толще, без маркеров)
     ema450Series = chart.addLineSeries({
         color: '#e0e3e8',
         lineWidth: 2,
         priceLineVisible: false,
         lastValueVisible: false,
+        crosshairMarkerVisible: false,
+        autoscaleInfoProvider: () => null,
     });
 
     window.addEventListener('resize', () => {
@@ -120,14 +126,13 @@ function initChart() {
     });
 }
 
-// Расчёт EMA на основе массива цен закрытия
+// Расчёт EMA
 function calculateEMA(data, period) {
     if (data.length < period) return [];
     
     const ema = [];
     const multiplier = 2 / (period + 1);
     
-    // Первое значение — SMA
     let sum = 0;
     for (let i = 0; i < period; i++) {
         sum += data[i].close;
@@ -135,7 +140,6 @@ function calculateEMA(data, period) {
     let prevEma = sum / period;
     ema.push({ time: data[period - 1].time, value: prevEma });
     
-    // Остальные значения по формуле EMA
     for (let i = period; i < data.length; i++) {
         const currentPrice = data[i].close;
         prevEma = (currentPrice - prevEma) * multiplier + prevEma;
@@ -164,10 +168,7 @@ async function loadChartData(symbol) {
         oldestTime = klines.length > 0 ? klines[0][0] : null;
         
         candleSeries.setData(currentCandles);
-        
-        // Рассчитываем и устанавливаем EMA
         updateEmaLines(currentCandles);
-        
         chart.timeScale().fitContent();
         
         if (wsReady) subscribeToKlineStream(symbol);
@@ -177,7 +178,6 @@ async function loadChartData(symbol) {
     }
 }
 
-// Обновление линий EMA
 function updateEmaLines(candles) {
     if (candles.length === 0) return;
     
@@ -225,8 +225,6 @@ async function loadMoreHistory() {
         oldestTime = klines[0][0];
         currentCandles = [...newCandles, ...currentCandles];
         candleSeries.setData(currentCandles);
-        
-        // Обновляем EMA с новым полным массивом
         updateEmaLines(currentCandles);
         
     } catch (e) {
@@ -328,20 +326,16 @@ function updateChartWithKline(data) {
         close: parseFloat(k.c)
     };
     
-    // Обновляем свечу (если она уже есть — update, иначе добавится)
     candleSeries.update(candle);
     
-    // Находим индекс свечи в currentCandles
     const existingIndex = currentCandles.findIndex(c => c.time === candle.time);
     if (existingIndex !== -1) {
         currentCandles[existingIndex] = candle;
     } else {
         currentCandles.push(candle);
-        // Сортируем по времени (на случай, если пришла более ранняя)
         currentCandles.sort((a, b) => a.time - b.time);
     }
     
-    // Пересчитываем EMA с обновлёнными данными
     updateEmaLines(currentCandles);
 }
 
