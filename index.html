@@ -25,7 +25,6 @@
             height: 100vh;
         }
 
-        /* Левая часть - график */
         .chart-section {
             flex: 1;
             display: flex;
@@ -65,22 +64,16 @@
             border-radius: 4px;
         }
 
-        .positive {
-            color: #0ecb81;
-        }
-
-        .negative {
-            color: #f6465d;
-        }
+        .positive { color: #0ecb81; }
+        .negative { color: #f6465d; }
 
         .chart-container {
             flex: 1;
             position: relative;
         }
 
-        /* Правая часть - скринер */
         .screener-section {
-            width: 420px; /* Увеличена ширина под 5 колонок */
+            width: 340px; /* уменьшено */
             display: flex;
             flex-direction: column;
             background: #151a20;
@@ -119,12 +112,12 @@
 
         .coin-item {
             display: grid;
-            grid-template-columns: 70px 1fr 1fr 1fr 1fr;
-            gap: 8px;
-            padding: 8px 12px;
+            grid-template-columns: 70px 1fr 1fr 1fr; /* 4 колонки */
+            gap: 6px;
+            padding: 6px 12px;
             border-radius: 4px;
             cursor: pointer;
-            font-size: 12px;
+            font-size: 11px;
             align-items: center;
             transition: background 0.1s;
         }
@@ -153,10 +146,10 @@
 
         .list-header {
             display: grid;
-            grid-template-columns: 70px 1fr 1fr 1fr 1fr;
-            gap: 8px;
+            grid-template-columns: 70px 1fr 1fr 1fr;
+            gap: 6px;
             padding: 8px 12px;
-            font-size: 11px;
+            font-size: 10px;
             color: #848e9c;
             border-bottom: 1px solid #1e2329;
             position: sticky;
@@ -255,7 +248,6 @@
 </head>
 <body>
     <div class="container">
-        <!-- График -->
         <div class="chart-section">
             <div class="chart-header">
                 <div class="symbol-info">
@@ -277,17 +269,14 @@
             <div class="chart-container" id="chart"></div>
         </div>
 
-        <!-- Скринер -->
         <div class="screener-section">
             <div class="screener-header">
                 <div class="screener-title">Фьючерсы (<span id="coinsCount">0</span>)</div>
-                <!-- Фильтры полностью удалены -->
             </div>
             <div class="list-header" id="listHeader">
                 <span data-sort="symbol">Пара</span>
                 <span class="text-right" data-sort="price">Цена</span>
                 <span class="text-right" data-sort="change">24ч %</span>
-                <span class="text-right" data-sort="change10m">10м %</span>
                 <span class="text-right" data-sort="change30m">30м %</span>
             </div>
             <div class="coins-list" id="coinsList">
@@ -295,7 +284,6 @@
             </div>
         </div>
     </div>
-
     <script src="app.js"></script>
 </body>
 </html>
