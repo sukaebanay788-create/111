@@ -80,7 +80,7 @@
 
         /* Правая часть - скринер */
         .screener-section {
-            width: 300px;
+            width: 420px; /* Увеличена ширина под 5 колонок */
             display: flex;
             flex-direction: column;
             background: #151a20;
@@ -96,41 +96,6 @@
             font-weight: 600;
             color: #fff;
             margin-bottom: 12px;
-        }
-
-        .filters {
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-        }
-
-        .filter-input {
-            background: #0b0e11;
-            border: 1px solid #1e2329;
-            border-radius: 4px;
-            padding: 8px 12px;
-            color: #d1d4dc;
-            font-size: 13px;
-            outline: none;
-        }
-
-        .filter-input:focus {
-            border-color: #f0b90b;
-        }
-
-        .filter-row {
-            display: flex;
-            gap: 8px;
-        }
-
-        .filter-row .filter-input {
-            flex: 1;
-        }
-
-        .filter-label {
-            font-size: 11px;
-            color: #848e9c;
-            margin-bottom: 2px;
         }
 
         .coins-list {
@@ -154,7 +119,7 @@
 
         .coin-item {
             display: grid;
-            grid-template-columns: 80px 1fr 1fr;
+            grid-template-columns: 70px 1fr 1fr 1fr 1fr;
             gap: 8px;
             padding: 8px 12px;
             border-radius: 4px;
@@ -188,7 +153,7 @@
 
         .list-header {
             display: grid;
-            grid-template-columns: 80px 1fr 1fr;
+            grid-template-columns: 70px 1fr 1fr 1fr 1fr;
             gap: 8px;
             padding: 8px 12px;
             font-size: 11px;
@@ -316,24 +281,14 @@
         <div class="screener-section">
             <div class="screener-header">
                 <div class="screener-title">Фьючерсы (<span id="coinsCount">0</span>)</div>
-                <div class="filters">
-                    <input type="text" class="filter-input" id="searchFilter" placeholder="Поиск...">
-                    <div class="filter-row">
-                        <div style="flex: 1;">
-                            <div class="filter-label">24ч % min</div>
-                            <input type="number" class="filter-input" id="changeMin" placeholder="-10">
-                        </div>
-                        <div style="flex: 1;">
-                            <div class="filter-label">24ч % max</div>
-                            <input type="number" class="filter-input" id="changeMax" placeholder="10">
-                        </div>
-                    </div>
-                </div>
+                <!-- Фильтры полностью удалены -->
             </div>
             <div class="list-header" id="listHeader">
                 <span data-sort="symbol">Пара</span>
                 <span class="text-right" data-sort="price">Цена</span>
                 <span class="text-right" data-sort="change">24ч %</span>
+                <span class="text-right" data-sort="change10m">10м %</span>
+                <span class="text-right" data-sort="change30m">30м %</span>
             </div>
             <div class="coins-list" id="coinsList">
                 <div class="loading">Загрузка...</div>
