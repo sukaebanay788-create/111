@@ -1,4 +1,4 @@
-// Binance Futures Screener (исправленный)
+// Binance Futures Screener (исправлены ошибки графика и сортировки)
 const BINANCE_WS = 'wss://fstream.binance.com/ws';
 const BINANCE_API = 'https://fapi.binance.com';
 
@@ -18,21 +18,18 @@ let lastSubscriptionSet = new Set();
 let currentKlineSymbol = null;
 let wsReady = false;
 
-// Для истории
 let currentCandles = [];
 let oldestTime = null;
 let isLoadingMore = false;
 
-// Инициализация
 async function init() {
     await loadCoins();
     initChart();
     connectWebSocket();
-    setupFilters();
+    setupEvents();
     loadChartData(currentSymbol);
 }
 
-// Загрузка списка фьючерсов с расчётом 10м/30м изменений
 async function loadCoins() {
     try {
         const exchangeInfoRes = await fetch(`${BINANCE_API}/fapi/v1/exchangeInfo`);
@@ -82,31 +79,22 @@ async function loadCoins() {
                     change: parseFloat(ticker.priceChangePercent),
                     change10m,
                     change30m,
-                    volume: parseFloat(ticker.volume),
-                    high: parseFloat(ticker.highPrice),
-                    low: parseFloat(ticker.lowPrice)
                 };
             } catch (e) {
-                console.error(`Ошибка загрузки данных для ${symbol}:`, e);
+                console.error(`Ошибка загрузки ${symbol}:`, e);
                 return {
                     symbol,
                     price: parseFloat(ticker.lastPrice),
                     change: parseFloat(ticker.priceChangePercent),
                     change10m: 0,
                     change30m: 0,
-                    volume: parseFloat(ticker.volume),
-                    high: parseFloat(ticker.highPrice),
-                    low: parseFloat(ticker.lowPrice)
                 };
             }
         });
 
         const results = await Promise.all(promises);
-        
         results.forEach(coinData => {
-            if (coinData) {
-                coins.set(coinData.symbol, coinData);
-            }
+            if (coinData) coins.set(coinData.symbol, coinData);
         });
 
         filteredCoins = Array.from(coins.values());
@@ -116,12 +104,10 @@ async function loadCoins() {
         
     } catch (error) {
         console.error('Ошибка загрузки монет:', error);
-        document.getElementById('coinsList').innerHTML = 
-            '<div class="loading">Ошибка загрузки</div>';
+        document.getElementById('coinsList').innerHTML = '<div class="loading">Ошибка загрузки</div>';
     }
 }
 
-// График
 function initChart() {
     const container = document.getElementById('chart');
     chart = LightweightCharts.createChart(container, {
@@ -138,34 +124,17 @@ function initChart() {
         wickUpColor: '#0ecb81', wickDownColor: '#f6465d',
     });
 
-    // EMA 65 (светло-серый, без маркеров)
     ema65Series = chart.addLineSeries({
-        color: '#a0a4ab',
-        lineWidth: 1,
-        priceLineVisible: false,
-        lastValueVisible: false,
-        crosshairMarkerVisible: false,
-        autoscaleInfoProvider: () => null,
+        color: '#a0a4ab', lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
+        crosshairMarkerVisible: false, autoscaleInfoProvider: () => null,
     });
-
-    // EMA 125 (светло-серый, без маркеров)
     ema125Series = chart.addLineSeries({
-        color: '#a0a4ab',
-        lineWidth: 1,
-        priceLineVisible: false,
-        lastValueVisible: false,
-        crosshairMarkerVisible: false,
-        autoscaleInfoProvider: () => null,
+        color: '#a0a4ab', lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
+        crosshairMarkerVisible: false, autoscaleInfoProvider: () => null,
     });
-
-    // EMA 450 (почти белый, толще, без маркеров)
     ema450Series = chart.addLineSeries({
-        color: '#e0e3e8',
-        lineWidth: 2,
-        priceLineVisible: false,
-        lastValueVisible: false,
-        crosshairMarkerVisible: false,
-        autoscaleInfoProvider: () => null,
+        color: '#e0e3e8', lineWidth: 2, priceLineVisible: false, lastValueVisible: false,
+        crosshairMarkerVisible: false, autoscaleInfoProvider: () => null,
     });
 
     window.addEventListener('resize', () => {
@@ -173,47 +142,32 @@ function initChart() {
     });
 }
 
-// Расчёт EMA
 function calculateEMA(data, period) {
     if (data.length < period) return [];
-    
     const ema = [];
     const multiplier = 2 / (period + 1);
-    
     let sum = 0;
-    for (let i = 0; i < period; i++) {
-        sum += data[i].close;
-    }
+    for (let i = 0; i < period; i++) sum += data[i].close;
     let prevEma = sum / period;
     ema.push({ time: data[period - 1].time, value: prevEma });
-    
     for (let i = period; i < data.length; i++) {
-        const currentPrice = data[i].close;
-        prevEma = (currentPrice - prevEma) * multiplier + prevEma;
+        prevEma = (data[i].close - prevEma) * multiplier + prevEma;
         ema.push({ time: data[i].time, value: prevEma });
     }
-    
     return ema;
 }
 
-// Первичная загрузка свечей (1400)
 async function loadChartData(symbol) {
     try {
-        const res = await fetch(
-            `${BINANCE_API}/fapi/v1/klines?symbol=${symbol}&interval=${currentTimeframe}&limit=1400`
-        );
+        const res = await fetch(`${BINANCE_API}/fapi/v1/klines?symbol=${symbol}&interval=${currentTimeframe}&limit=1400`);
         const klines = await res.json();
         
         currentCandles = klines.map(k => ({
             time: k[0] / 1000,
-            open: parseFloat(k[1]),
-            high: parseFloat(k[2]),
-            low: parseFloat(k[3]),
-            close: parseFloat(k[4]),
+            open: parseFloat(k[1]), high: parseFloat(k[2]), low: parseFloat(k[3]), close: parseFloat(k[4]),
         }));
         
         oldestTime = klines.length > 0 ? klines[0][0] : null;
-        
         candleSeries.setData(currentCandles);
         updateEmaLines(currentCandles);
         chart.timeScale().fitContent();
@@ -227,53 +181,34 @@ async function loadChartData(symbol) {
 
 function updateEmaLines(candles) {
     if (candles.length === 0) return;
-    
-    const ema65 = calculateEMA(candles, 65);
-    const ema125 = calculateEMA(candles, 125);
-    const ema450 = calculateEMA(candles, 450);
-    
-    ema65Series.setData(ema65);
-    ema125Series.setData(ema125);
-    ema450Series.setData(ema450);
+    ema65Series.setData(calculateEMA(candles, 65));
+    ema125Series.setData(calculateEMA(candles, 125));
+    ema450Series.setData(calculateEMA(candles, 450));
 }
 
-// Подгрузка более старых свечей
 async function loadMoreHistory() {
     if (isLoadingMore || !oldestTime) return;
     isLoadingMore = true;
-    
     const btn = document.getElementById('loadMoreBtn');
     btn.textContent = '⏳';
     btn.disabled = true;
     
     try {
         const endTime = oldestTime - 1;
-        const res = await fetch(
-            `${BINANCE_API}/fapi/v1/klines?symbol=${currentSymbol}&interval=${currentTimeframe}&limit=1000&endTime=${endTime}`
-        );
+        const res = await fetch(`${BINANCE_API}/fapi/v1/klines?symbol=${currentSymbol}&interval=${currentTimeframe}&limit=1000&endTime=${endTime}`);
         const klines = await res.json();
-        
         if (klines.length === 0) {
             console.log('Больше истории нет');
-            btn.textContent = '📜';
-            btn.disabled = false;
-            isLoadingMore = false;
             return;
         }
-        
         const newCandles = klines.map(k => ({
             time: k[0] / 1000,
-            open: parseFloat(k[1]),
-            high: parseFloat(k[2]),
-            low: parseFloat(k[3]),
-            close: parseFloat(k[4]),
+            open: parseFloat(k[1]), high: parseFloat(k[2]), low: parseFloat(k[3]), close: parseFloat(k[4]),
         }));
-        
         oldestTime = klines[0][0];
         currentCandles = [...newCandles, ...currentCandles];
         candleSeries.setData(currentCandles);
         updateEmaLines(currentCandles);
-        
     } catch (e) {
         console.error('Ошибка подгрузки истории:', e);
     } finally {
@@ -283,24 +218,20 @@ async function loadMoreHistory() {
     }
 }
 
-// WebSocket
 function connectWebSocket() {
     ws = new WebSocket(BINANCE_WS);
-    
     ws.onopen = () => {
         wsReady = true;
         updateConnectionStatus(true);
         updateSubscriptions();
         if (currentSymbol) subscribeToKlineStream(currentSymbol);
     };
-    
     ws.onmessage = (event) => {
         const msg = JSON.parse(event.data);
         if (msg.id) return;
         if (msg.e === '24hrTicker') updateTicker(msg);
         else if (msg.e === 'kline') updateChartWithKline(msg);
     };
-    
     ws.onclose = () => {
         wsReady = false;
         updateConnectionStatus(false);
@@ -308,44 +239,26 @@ function connectWebSocket() {
         currentKlineSymbol = null;
         setTimeout(connectWebSocket, 5000);
     };
-    
-    ws.onerror = (e) => {
-        console.error('WS error:', e);
-        updateConnectionStatus(false);
-    };
+    ws.onerror = (e) => console.error('WS error:', e);
 }
 
 function updateSubscriptions() {
     if (!wsReady || ws.readyState !== WebSocket.OPEN) return;
-    
     const target = new Set(filteredCoins.slice(0, 50).map(c => c.symbol.toLowerCase()));
-    const toUnsub = [];
-    const toSub = [];
-    
+    const toUnsub = [], toSub = [];
     lastSubscriptionSet.forEach(sym => { if (!target.has(sym)) toUnsub.push(`${sym}@ticker`); });
     target.forEach(sym => { if (!lastSubscriptionSet.has(sym)) toSub.push(`${sym}@ticker`); });
-    
     if (toUnsub.length) ws.send(JSON.stringify({ method: 'UNSUBSCRIBE', params: toUnsub, id: Date.now() }));
     if (toSub.length) ws.send(JSON.stringify({ method: 'SUBSCRIBE', params: toSub, id: Date.now()+1 }));
-    
     lastSubscriptionSet = target;
 }
 
 function subscribeToKlineStream(symbol) {
     if (!wsReady || ws.readyState !== WebSocket.OPEN) return;
-    
     if (currentKlineSymbol && currentKlineSymbol !== symbol) {
-        ws.send(JSON.stringify({
-            method: 'UNSUBSCRIBE',
-            params: [`${currentKlineSymbol.toLowerCase()}@kline_${currentTimeframe}`],
-            id: Date.now()
-        }));
+        ws.send(JSON.stringify({ method: 'UNSUBSCRIBE', params: [`${currentKlineSymbol.toLowerCase()}@kline_${currentTimeframe}`], id: Date.now() }));
     }
-    ws.send(JSON.stringify({
-        method: 'SUBSCRIBE',
-        params: [`${symbol.toLowerCase()}@kline_${currentTimeframe}`],
-        id: Date.now()+1
-    }));
+    ws.send(JSON.stringify({ method: 'SUBSCRIBE', params: [`${symbol.toLowerCase()}@kline_${currentTimeframe}`], id: Date.now()+1 }));
     currentKlineSymbol = symbol;
 }
 
@@ -353,40 +266,54 @@ function updateTicker(data) {
     const symbol = data.s.toUpperCase();
     const coin = coins.get(symbol);
     if (!coin) return;
-    
     coin.price = parseFloat(data.c);
     coin.change = parseFloat(data.P);
-    
     if (symbol === currentSymbol) updateHeader(symbol);
-    
     const idx = filteredCoins.findIndex(c => c.symbol === symbol);
     if (idx !== -1) updateCoinRow(coin);
 }
 
 function updateChartWithKline(data) {
     const k = data.k;
-    const candle = {
-        time: k.t / 1000,
+    const candleTime = k.t / 1000;
+    const newCandle = {
+        time: candleTime,
         open: parseFloat(k.o),
         high: parseFloat(k.h),
         low: parseFloat(k.l),
         close: parseFloat(k.c)
     };
-    
-    candleSeries.update(candle);
-    
-    const existingIndex = currentCandles.findIndex(c => c.time === candle.time);
-    if (existingIndex !== -1) {
-        currentCandles[existingIndex] = candle;
+
+    // Получаем последнюю свечу в серии
+    const lastCandle = currentCandles.length > 0 ? currentCandles[currentCandles.length - 1] : null;
+
+    if (!lastCandle) {
+        // Нет данных, просто добавляем
+        currentCandles = [newCandle];
+        candleSeries.setData(currentCandles);
+    } else if (candleTime === lastCandle.time) {
+        // Обновляем текущую незакрытую свечу
+        lastCandle.open = newCandle.open;
+        lastCandle.high = newCandle.high;
+        lastCandle.low = newCandle.low;
+        lastCandle.close = newCandle.close;
+        candleSeries.update(newCandle);
+    } else if (candleTime > lastCandle.time) {
+        // Новая закрытая свеча (время строго больше)
+        currentCandles.push(newCandle);
+        // Ограничиваем размер массива (можно хранить все, но чтобы не перегружать)
+        if (currentCandles.length > 5000) currentCandles.shift();
+        candleSeries.update(newCandle);
     } else {
-        currentCandles.push(candle);
-        currentCandles.sort((a, b) => a.time - b.time);
+        // Время меньше последнего - возможно, старая свеча пришла с задержкой, игнорируем
+        console.warn('Получена устаревшая свеча, игнорируем', candleTime, lastCandle.time);
+        return;
     }
-    
+
+    // Обновляем EMA на основе актуального массива currentCandles
     updateEmaLines(currentCandles);
 }
 
-// UI
 function updateHeader(symbol) {
     const coin = coins.get(symbol);
     if (!coin) return;
@@ -404,21 +331,16 @@ function formatPrice(p) {
     return p.toFixed(6);
 }
 
-// Настройка событий (без фильтров)
-function setupFilters() {
+function setupEvents() {
     document.querySelectorAll('.tf-btn').forEach(btn => {
         btn.addEventListener('click', () => setTimeframe(btn.dataset.tf));
     });
     document.querySelectorAll('#listHeader span').forEach(span => {
         span.addEventListener('click', () => sortBy(span.dataset.sort));
     });
-    const loadMoreBtn = document.getElementById('loadMoreBtn');
-    if (loadMoreBtn) {
-        loadMoreBtn.addEventListener('click', loadMoreHistory);
-    }
+    document.getElementById('loadMoreBtn').addEventListener('click', loadMoreHistory);
 }
 
-// Сортировка
 function sortBy(field) {
     if (sortField === field) sortDesc = !sortDesc;
     else { sortField = field; sortDesc = true; }
@@ -437,7 +359,6 @@ function sortCoins() {
     });
 }
 
-// Рендер списка (5 колонок)
 function renderCoinsList() {
     const container = document.getElementById('coinsList');
     container.innerHTML = '';
@@ -450,20 +371,16 @@ function createCoinRow(coin) {
     div.dataset.symbol = coin.symbol;
     div.onclick = () => selectCoin(coin.symbol);
     
-    const change24hClass = coin.change >= 0 ? 'positive' : 'negative';
-    const change10mClass = coin.change10m >= 0 ? 'positive' : 'negative';
-    const change30mClass = coin.change30m >= 0 ? 'positive' : 'negative';
-    
-    const sign24h = coin.change >= 0 ? '+' : '';
-    const sign10m = coin.change10m >= 0 ? '+' : '';
-    const sign30m = coin.change30m >= 0 ? '+' : '';
+    const c24 = coin.change >= 0 ? 'positive' : 'negative';
+    const c10 = coin.change10m >= 0 ? 'positive' : 'negative';
+    const c30 = coin.change30m >= 0 ? 'positive' : 'negative';
     
     div.innerHTML = `
         <span class="coin-symbol">${coin.symbol.replace('USDT', '')}</span>
         <span class="coin-price">${formatPrice(coin.price)}</span>
-        <span class="coin-change ${change24hClass}">${sign24h}${coin.change.toFixed(2)}%</span>
-        <span class="coin-change ${change10mClass}">${sign10m}${coin.change10m.toFixed(2)}%</span>
-        <span class="coin-change ${change30mClass}">${sign30m}${coin.change30m.toFixed(2)}%</span>
+        <span class="coin-change ${c24}">${coin.change >= 0 ? '+' : ''}${coin.change.toFixed(2)}%</span>
+        <span class="coin-change ${c10}">${coin.change10m >= 0 ? '+' : ''}${coin.change10m.toFixed(2)}%</span>
+        <span class="coin-change ${c30}">${coin.change30m >= 0 ? '+' : ''}${coin.change30m.toFixed(2)}%</span>
     `;
     return div;
 }
@@ -471,14 +388,11 @@ function createCoinRow(coin) {
 function updateCoinRow(coin) {
     const row = document.querySelector(`.coin-item[data-symbol="${coin.symbol}"]`);
     if (!row) return;
-    
-    const change24hClass = coin.change >= 0 ? 'positive' : 'negative';
-    const sign24h = coin.change >= 0 ? '+' : '';
-    
+    const sign = coin.change >= 0 ? '+' : '';
     row.children[1].textContent = formatPrice(coin.price);
-    row.children[2].textContent = `${sign24h}${coin.change.toFixed(2)}%`;
-    row.children[2].className = `coin-change ${change24hClass}`;
-    // 10m и 30m не обновляются в реальном времени
+    row.children[2].textContent = `${sign}${coin.change.toFixed(2)}%`;
+    row.children[2].className = `coin-change ${coin.change >= 0 ? 'positive' : 'negative'}`;
+    // 10m и 30m не обновляются через WebSocket, оставляем как есть
 }
 
 function selectCoin(symbol) {
@@ -509,5 +423,4 @@ function setTimeframe(tf) {
     loadChartData(currentSymbol);
 }
 
-// Запуск
 init();
