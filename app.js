@@ -1,4 +1,4 @@
-// Binance Futures Screener (без 10м, только 24ч и 30м)
+// Binance Futures Screener (обновление 30м по клику)
 const BINANCE_WS = 'wss://fstream.binance.com/ws';
 const BINANCE_API = 'https://fapi.binance.com';
 
@@ -51,7 +51,6 @@ async function loadCoins() {
             if (!ticker) return null;
 
             try {
-                // Только 30м свечи
                 const klines30m = await fetch(`${BINANCE_API}/fapi/v1/klines?symbol=${symbol}&interval=30m&limit=2`).then(r => {
                     if (!r.ok) throw new Error('No data');
                     return r.json();
@@ -70,7 +69,6 @@ async function loadCoins() {
                     change30m,
                 };
             } catch (e) {
-                // Если не удалось получить 30м, оставляем 0
                 return {
                     symbol,
                     price: parseFloat(ticker.lastPrice),
@@ -294,12 +292,45 @@ function formatPrice(p) {
     return p.toFixed(6);
 }
 
+// Функция обновления 30-минутных изменений
+async function refresh30mChanges() {
+    const headerSpan = document.querySelector('#listHeader span[data-sort="change30m"]');
+    const originalText = headerSpan.textContent;
+    headerSpan.textContent = '⏳ 30м';
+
+    const promises = filteredCoins.map(async (coin) => {
+        try {
+            const res = await fetch(`${BINANCE_API}/fapi/v1/klines?symbol=${coin.symbol}&interval=30m&limit=2`);
+            if (!res.ok) return coin;
+            const klines = await res.json();
+            if (klines.length >= 1) {
+                const lastCandle = klines[klines.length - 1];
+                const open = parseFloat(lastCandle[1]);
+                const close = parseFloat(lastCandle[4]);
+                coin.change30m = ((close - open) / open) * 100;
+            }
+        } catch (e) {
+            // оставляем старое значение
+        }
+        return coin;
+    });
+
+    await Promise.all(promises);
+    headerSpan.textContent = originalText;
+}
+
 function setupEvents() {
     document.querySelectorAll('.tf-btn').forEach(btn => {
         btn.addEventListener('click', () => setTimeframe(btn.dataset.tf));
     });
     document.querySelectorAll('#listHeader span').forEach(span => {
-        span.addEventListener('click', () => sortBy(span.dataset.sort));
+        span.addEventListener('click', async () => {
+            const field = span.dataset.sort;
+            if (field === 'change30m') {
+                await refresh30mChanges();
+            }
+            sortBy(field);
+        });
     });
     document.getElementById('loadMoreBtn').addEventListener('click', loadMoreHistory);
 }
@@ -349,7 +380,7 @@ function updateCoinRow(coin) {
     row.children[1].textContent = formatPrice(coin.price);
     row.children[2].textContent = `${coin.change >= 0 ? '+' : ''}${coin.change.toFixed(2)}%`;
     row.children[2].className = `coin-change ${coin.change >= 0 ? 'positive' : 'negative'}`;
-    // 30м не обновляется динамически
+    // 30м не обновляется динамически, только по клику
 }
 
 function selectCoin(symbol) {
