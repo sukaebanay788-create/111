@@ -1,4 +1,4 @@
-// Binance Futures Screener (исправлены ошибки графика и сортировки)
+// Binance Futures Screener (4 колонки: Пара, Цена, 24ч%, 30м%)
 const BINANCE_WS = 'wss://fstream.binance.com/ws';
 const BINANCE_API = 'https://fapi.binance.com';
 
@@ -51,21 +51,11 @@ async function loadCoins() {
             if (!ticker) return null;
 
             try {
-                const [klines10m, klines30m] = await Promise.all([
-                    fetch(`${BINANCE_API}/fapi/v1/klines?symbol=${symbol}&interval=10m&limit=2`).then(r => r.json()),
-                    fetch(`${BINANCE_API}/fapi/v1/klines?symbol=${symbol}&interval=30m&limit=2`).then(r => r.json())
-                ]);
+                // Получаем только 30м свечи (10м убираем)
+                const klines30m = await fetch(`${BINANCE_API}/fapi/v1/klines?symbol=${symbol}&interval=30m&limit=2`)
+                    .then(r => r.ok ? r.json() : []);
 
-                let change10m = 0;
                 let change30m = 0;
-
-                if (klines10m.length >= 1) {
-                    const lastCandle = klines10m[klines10m.length - 1];
-                    const open = parseFloat(lastCandle[1]);
-                    const close = parseFloat(lastCandle[4]);
-                    change10m = ((close - open) / open) * 100;
-                }
-
                 if (klines30m.length >= 1) {
                     const lastCandle = klines30m[klines30m.length - 1];
                     const open = parseFloat(lastCandle[1]);
@@ -77,16 +67,13 @@ async function loadCoins() {
                     symbol,
                     price: parseFloat(ticker.lastPrice),
                     change: parseFloat(ticker.priceChangePercent),
-                    change10m,
                     change30m,
                 };
             } catch (e) {
-                console.error(`Ошибка загрузки ${symbol}:`, e);
                 return {
                     symbol,
                     price: parseFloat(ticker.lastPrice),
                     change: parseFloat(ticker.priceChangePercent),
-                    change10m: 0,
                     change30m: 0,
                 };
             }
@@ -284,33 +271,26 @@ function updateChartWithKline(data) {
         close: parseFloat(k.c)
     };
 
-    // Получаем последнюю свечу в серии
     const lastCandle = currentCandles.length > 0 ? currentCandles[currentCandles.length - 1] : null;
 
     if (!lastCandle) {
-        // Нет данных, просто добавляем
         currentCandles = [newCandle];
         candleSeries.setData(currentCandles);
     } else if (candleTime === lastCandle.time) {
-        // Обновляем текущую незакрытую свечу
         lastCandle.open = newCandle.open;
         lastCandle.high = newCandle.high;
         lastCandle.low = newCandle.low;
         lastCandle.close = newCandle.close;
         candleSeries.update(newCandle);
     } else if (candleTime > lastCandle.time) {
-        // Новая закрытая свеча (время строго больше)
         currentCandles.push(newCandle);
-        // Ограничиваем размер массива (можно хранить все, но чтобы не перегружать)
         if (currentCandles.length > 5000) currentCandles.shift();
         candleSeries.update(newCandle);
     } else {
-        // Время меньше последнего - возможно, старая свеча пришла с задержкой, игнорируем
-        console.warn('Получена устаревшая свеча, игнорируем', candleTime, lastCandle.time);
+        // Игнорируем устаревшие свечи без вывода в консоль
         return;
     }
 
-    // Обновляем EMA на основе актуального массива currentCandles
     updateEmaLines(currentCandles);
 }
 
@@ -372,14 +352,12 @@ function createCoinRow(coin) {
     div.onclick = () => selectCoin(coin.symbol);
     
     const c24 = coin.change >= 0 ? 'positive' : 'negative';
-    const c10 = coin.change10m >= 0 ? 'positive' : 'negative';
     const c30 = coin.change30m >= 0 ? 'positive' : 'negative';
     
     div.innerHTML = `
         <span class="coin-symbol">${coin.symbol.replace('USDT', '')}</span>
         <span class="coin-price">${formatPrice(coin.price)}</span>
         <span class="coin-change ${c24}">${coin.change >= 0 ? '+' : ''}${coin.change.toFixed(2)}%</span>
-        <span class="coin-change ${c10}">${coin.change10m >= 0 ? '+' : ''}${coin.change10m.toFixed(2)}%</span>
         <span class="coin-change ${c30}">${coin.change30m >= 0 ? '+' : ''}${coin.change30m.toFixed(2)}%</span>
     `;
     return div;
@@ -392,7 +370,6 @@ function updateCoinRow(coin) {
     row.children[1].textContent = formatPrice(coin.price);
     row.children[2].textContent = `${sign}${coin.change.toFixed(2)}%`;
     row.children[2].className = `coin-change ${coin.change >= 0 ? 'positive' : 'negative'}`;
-    // 10m и 30m не обновляются через WebSocket, оставляем как есть
 }
 
 function selectCoin(symbol) {
