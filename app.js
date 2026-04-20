@@ -1,9 +1,9 @@
-// Binance Futures Screener (с 10м/30м изменениями, без фильтров)
+// Binance Futures Screener (исправленный)
 const BINANCE_WS = 'wss://fstream.binance.com/ws';
 const BINANCE_API = 'https://fapi.binance.com';
 
 let coins = new Map();
-let filteredCoins = [];   // теперь всегда равен всем монетам
+let filteredCoins = [];
 let currentSymbol = 'BTCUSDT';
 let ws = null;
 let chart = null;
@@ -28,7 +28,7 @@ async function init() {
     await loadCoins();
     initChart();
     connectWebSocket();
-    setupFilters();   // на самом деле теперь только настройка событий
+    setupFilters();
     loadChartData(currentSymbol);
 }
 
@@ -44,19 +44,16 @@ async function loadCoins() {
             s.contractType === 'PERPETUAL'
         );
 
-        // Получаем 24h изменения
         const tickersRes = await fetch(`${BINANCE_API}/fapi/v1/ticker/24hr`);
         const tickers = await tickersRes.json();
         const tickersMap = new Map(tickers.map(t => [t.symbol, t]));
 
-        // Для каждой пары получаем 10м и 30м свечи
         const promises = usdtPairs.map(async (pair) => {
             const symbol = pair.symbol;
             const ticker = tickersMap.get(symbol);
             if (!ticker) return null;
 
             try {
-                // Получаем последние 2 свечи 10m и 30m (достаточно одной, но берём две для расчёта изменения)
                 const [klines10m, klines30m] = await Promise.all([
                     fetch(`${BINANCE_API}/fapi/v1/klines?symbol=${symbol}&interval=10m&limit=2`).then(r => r.json()),
                     fetch(`${BINANCE_API}/fapi/v1/klines?symbol=${symbol}&interval=30m&limit=2`).then(r => r.json())
@@ -65,7 +62,6 @@ async function loadCoins() {
                 let change10m = 0;
                 let change30m = 0;
 
-                // Расчёт 10м изменения: (close последней свечи - open последней свечи) / open * 100
                 if (klines10m.length >= 1) {
                     const lastCandle = klines10m[klines10m.length - 1];
                     const open = parseFloat(lastCandle[1]);
@@ -73,7 +69,6 @@ async function loadCoins() {
                     change10m = ((close - open) / open) * 100;
                 }
 
-                // Аналогично для 30м
                 if (klines30m.length >= 1) {
                     const lastCandle = klines30m[klines30m.length - 1];
                     const open = parseFloat(lastCandle[1]);
@@ -93,7 +88,6 @@ async function loadCoins() {
                 };
             } catch (e) {
                 console.error(`Ошибка загрузки данных для ${symbol}:`, e);
-                // Если не удалось получить 10m/30m, оставляем нули
                 return {
                     symbol,
                     price: parseFloat(ticker.lastPrice),
@@ -115,7 +109,6 @@ async function loadCoins() {
             }
         });
 
-        // Фильтрации больше нет, просто копируем все монеты в filteredCoins
         filteredCoins = Array.from(coins.values());
         sortCoins();
         renderCoinsList();
@@ -411,16 +404,18 @@ function formatPrice(p) {
     return p.toFixed(6);
 }
 
-// Функция setupFilters переименована, но оставлена для совместимости (настройка событий)
+// Настройка событий (без фильтров)
 function setupFilters() {
-    // События для кнопок таймфрейма и сортировки
     document.querySelectorAll('.tf-btn').forEach(btn => {
         btn.addEventListener('click', () => setTimeframe(btn.dataset.tf));
     });
     document.querySelectorAll('#listHeader span').forEach(span => {
         span.addEventListener('click', () => sortBy(span.dataset.sort));
     });
-    document.getElementById('loadMoreBtn').addEventListener('click', loadMoreHistory);
+    const loadMoreBtn = document.getElementById('loadMoreBtn');
+    if (loadMoreBtn) {
+        loadMoreBtn.addEventListener('click', loadMoreHistory);
+    }
 }
 
 // Сортировка
@@ -480,11 +475,10 @@ function updateCoinRow(coin) {
     const change24hClass = coin.change >= 0 ? 'positive' : 'negative';
     const sign24h = coin.change >= 0 ? '+' : '';
     
-    // Обновляем только цену и 24h изменение, 10m/30m не обновляются в реальном времени
     row.children[1].textContent = formatPrice(coin.price);
     row.children[2].textContent = `${sign24h}${coin.change.toFixed(2)}%`;
     row.children[2].className = `coin-change ${change24hClass}`;
-    // 10m и 30m остаются без изменений
+    // 10m и 30m не обновляются в реальном времени
 }
 
 function selectCoin(symbol) {
