@@ -1,9 +1,9 @@
-// Binance Futures Screener (с EMA 65, 125, 450 без маркеров)
+// Binance Futures Screener (с 10м/30м изменениями, без фильтров)
 const BINANCE_WS = 'wss://fstream.binance.com/ws';
 const BINANCE_API = 'https://fapi.binance.com';
 
 let coins = new Map();
-let filteredCoins = [];
+let filteredCoins = [];   // теперь всегда равен всем монетам
 let currentSymbol = 'BTCUSDT';
 let ws = null;
 let chart = null;
@@ -28,11 +28,11 @@ async function init() {
     await loadCoins();
     initChart();
     connectWebSocket();
-    setupFilters();
+    setupFilters();   // на самом деле теперь только настройка событий
     loadChartData(currentSymbol);
 }
 
-// Загрузка списка фьючерсов
+// Загрузка списка фьючерсов с расчётом 10м/30м изменений
 async function loadCoins() {
     try {
         const exchangeInfoRes = await fetch(`${BINANCE_API}/fapi/v1/exchangeInfo`);
@@ -44,27 +44,81 @@ async function loadCoins() {
             s.contractType === 'PERPETUAL'
         );
 
+        // Получаем 24h изменения
         const tickersRes = await fetch(`${BINANCE_API}/fapi/v1/ticker/24hr`);
         const tickers = await tickersRes.json();
         const tickersMap = new Map(tickers.map(t => [t.symbol, t]));
 
-        usdtPairs.forEach(pair => {
+        // Для каждой пары получаем 10м и 30м свечи
+        const promises = usdtPairs.map(async (pair) => {
             const symbol = pair.symbol;
             const ticker = tickersMap.get(symbol);
-            
-            if (ticker) {
-                coins.set(symbol, {
+            if (!ticker) return null;
+
+            try {
+                // Получаем последние 2 свечи 10m и 30m (достаточно одной, но берём две для расчёта изменения)
+                const [klines10m, klines30m] = await Promise.all([
+                    fetch(`${BINANCE_API}/fapi/v1/klines?symbol=${symbol}&interval=10m&limit=2`).then(r => r.json()),
+                    fetch(`${BINANCE_API}/fapi/v1/klines?symbol=${symbol}&interval=30m&limit=2`).then(r => r.json())
+                ]);
+
+                let change10m = 0;
+                let change30m = 0;
+
+                // Расчёт 10м изменения: (close последней свечи - open последней свечи) / open * 100
+                if (klines10m.length >= 1) {
+                    const lastCandle = klines10m[klines10m.length - 1];
+                    const open = parseFloat(lastCandle[1]);
+                    const close = parseFloat(lastCandle[4]);
+                    change10m = ((close - open) / open) * 100;
+                }
+
+                // Аналогично для 30м
+                if (klines30m.length >= 1) {
+                    const lastCandle = klines30m[klines30m.length - 1];
+                    const open = parseFloat(lastCandle[1]);
+                    const close = parseFloat(lastCandle[4]);
+                    change30m = ((close - open) / open) * 100;
+                }
+
+                return {
                     symbol,
                     price: parseFloat(ticker.lastPrice),
                     change: parseFloat(ticker.priceChangePercent),
+                    change10m,
+                    change30m,
                     volume: parseFloat(ticker.volume),
                     high: parseFloat(ticker.highPrice),
                     low: parseFloat(ticker.lowPrice)
-                });
+                };
+            } catch (e) {
+                console.error(`Ошибка загрузки данных для ${symbol}:`, e);
+                // Если не удалось получить 10m/30m, оставляем нули
+                return {
+                    symbol,
+                    price: parseFloat(ticker.lastPrice),
+                    change: parseFloat(ticker.priceChangePercent),
+                    change10m: 0,
+                    change30m: 0,
+                    volume: parseFloat(ticker.volume),
+                    high: parseFloat(ticker.highPrice),
+                    low: parseFloat(ticker.lowPrice)
+                };
             }
         });
 
-        applyFilters();
+        const results = await Promise.all(promises);
+        
+        results.forEach(coinData => {
+            if (coinData) {
+                coins.set(coinData.symbol, coinData);
+            }
+        });
+
+        // Фильтрации больше нет, просто копируем все монеты в filteredCoins
+        filteredCoins = Array.from(coins.values());
+        sortCoins();
+        renderCoinsList();
         updateCoinsCount();
         
     } catch (error) {
@@ -357,11 +411,9 @@ function formatPrice(p) {
     return p.toFixed(6);
 }
 
-// Фильтры и сортировка
+// Функция setupFilters переименована, но оставлена для совместимости (настройка событий)
 function setupFilters() {
-    ['searchFilter', 'changeMin', 'changeMax'].forEach(id => {
-        document.getElementById(id).addEventListener('input', applyFilters);
-    });
+    // События для кнопок таймфрейма и сортировки
     document.querySelectorAll('.tf-btn').forEach(btn => {
         btn.addEventListener('click', () => setTimeframe(btn.dataset.tf));
     });
@@ -371,21 +423,7 @@ function setupFilters() {
     document.getElementById('loadMoreBtn').addEventListener('click', loadMoreHistory);
 }
 
-function applyFilters() {
-    const search = document.getElementById('searchFilter').value.toUpperCase();
-    const min = parseFloat(document.getElementById('changeMin').value) || -Infinity;
-    const max = parseFloat(document.getElementById('changeMax').value) || Infinity;
-    
-    filteredCoins = Array.from(coins.values()).filter(c => 
-        c.symbol.includes(search) && c.change >= min && c.change <= max
-    );
-    
-    sortCoins();
-    renderCoinsList();
-    updateCoinsCount();
-    updateSubscriptions();
-}
-
+// Сортировка
 function sortBy(field) {
     if (sortField === field) sortDesc = !sortDesc;
     else { sortField = field; sortDesc = true; }
@@ -395,7 +433,8 @@ function sortBy(field) {
 
 function sortCoins() {
     filteredCoins.sort((a, b) => {
-        let va = a[sortField], vb = b[sortField];
+        let va = a[sortField];
+        let vb = b[sortField];
         if (typeof va === 'string') { va = va.toLowerCase(); vb = vb.toLowerCase(); }
         if (va < vb) return sortDesc ? 1 : -1;
         if (va > vb) return sortDesc ? -1 : 1;
@@ -403,6 +442,7 @@ function sortCoins() {
     });
 }
 
+// Рендер списка (5 колонок)
 function renderCoinsList() {
     const container = document.getElementById('coinsList');
     container.innerHTML = '';
@@ -414,12 +454,21 @@ function createCoinRow(coin) {
     div.className = 'coin-item' + (coin.symbol === currentSymbol ? ' active' : '');
     div.dataset.symbol = coin.symbol;
     div.onclick = () => selectCoin(coin.symbol);
-    const changeClass = coin.change >= 0 ? 'positive' : 'negative';
-    const sign = coin.change >= 0 ? '+' : '';
+    
+    const change24hClass = coin.change >= 0 ? 'positive' : 'negative';
+    const change10mClass = coin.change10m >= 0 ? 'positive' : 'negative';
+    const change30mClass = coin.change30m >= 0 ? 'positive' : 'negative';
+    
+    const sign24h = coin.change >= 0 ? '+' : '';
+    const sign10m = coin.change10m >= 0 ? '+' : '';
+    const sign30m = coin.change30m >= 0 ? '+' : '';
+    
     div.innerHTML = `
         <span class="coin-symbol">${coin.symbol.replace('USDT', '')}</span>
         <span class="coin-price">${formatPrice(coin.price)}</span>
-        <span class="coin-change ${changeClass}">${sign}${coin.change.toFixed(2)}%</span>
+        <span class="coin-change ${change24hClass}">${sign24h}${coin.change.toFixed(2)}%</span>
+        <span class="coin-change ${change10mClass}">${sign10m}${coin.change10m.toFixed(2)}%</span>
+        <span class="coin-change ${change30mClass}">${sign30m}${coin.change30m.toFixed(2)}%</span>
     `;
     return div;
 }
@@ -427,10 +476,15 @@ function createCoinRow(coin) {
 function updateCoinRow(coin) {
     const row = document.querySelector(`.coin-item[data-symbol="${coin.symbol}"]`);
     if (!row) return;
-    const sign = coin.change >= 0 ? '+' : '';
+    
+    const change24hClass = coin.change >= 0 ? 'positive' : 'negative';
+    const sign24h = coin.change >= 0 ? '+' : '';
+    
+    // Обновляем только цену и 24h изменение, 10m/30m не обновляются в реальном времени
     row.children[1].textContent = formatPrice(coin.price);
-    row.children[2].textContent = `${sign}${coin.change.toFixed(2)}%`;
-    row.children[2].className = `coin-change ${coin.change >= 0 ? 'positive' : 'negative'}`;
+    row.children[2].textContent = `${sign24h}${coin.change.toFixed(2)}%`;
+    row.children[2].className = `coin-change ${change24hClass}`;
+    // 10m и 30m остаются без изменений
 }
 
 function selectCoin(symbol) {
