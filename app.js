@@ -1,5 +1,5 @@
-// Binance Futures Screener (обновление 30м по клику)
-const BINANCE_WS = 'wss://fstream.binance.com/ws';
+// app.js
+const BINANCE_WS_MARKET = 'wss://fstream.binance.com/market/ws';
 const BINANCE_API = 'https://fapi.binance.com';
 
 let coins = new Map();
@@ -22,14 +22,42 @@ let currentCandles = [];
 let oldestTime = null;
 let isLoadingMore = false;
 
+// ---------- Ликвидации ----------
+let liquidationWs = null;
+let liquidationMarkers = [];
+const MAX_MARKERS_PER_SYMBOL = 500;
+const MIN_VOLUME_BTC = 100000;   // фильтр для BTCUSDT
+const MIN_VOLUME_ETH = 50000;    // фильтр для ETHUSDT
+const MIN_VOLUME_USD = 10000;    // общий фильтр для остальных
+let liquidationCount = 0;
+
+const allLiquidations = new Map();
+const STORAGE_PREFIX = 'binance_liq_';
+
+let recentLiquidations = [];
+const MAX_RECENT = 20;
+
+function getTimeframeMs(tf) {
+    const unit = tf.slice(-1);
+    const value = parseInt(tf);
+    switch (unit) {
+        case 'm': return value * 60 * 1000;
+        case 'h': return value * 60 * 60 * 1000;
+        default: return 15 * 60 * 1000;
+    }
+}
+
+// Инициализация
 async function init() {
     await loadCoins();
     initChart();
     connectWebSocket();
+    connectLiquidationWebSocket();
     setupEvents();
     loadChartData(currentSymbol);
 }
 
+// Загрузка списка фьючерсов
 async function loadCoins() {
     try {
         const exchangeInfoRes = await fetch(`${BINANCE_API}/fapi/v1/exchangeInfo`);
@@ -93,13 +121,14 @@ async function loadCoins() {
     }
 }
 
+// График
 function initChart() {
     const container = document.getElementById('chart');
     chart = LightweightCharts.createChart(container, {
         layout: { background: { color: '#0b0e11' }, textColor: '#d1d4dc' },
         grid: { vertLines: { color: '#1e2329' }, horzLines: { color: '#1e2329' } },
         crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
-        rightPriceScale: { borderColor: '#1e2329' },
+        rightPriceScale: { borderColor: '#1e2329', autoScale: true, scaleMargins: { top: 0.02, bottom: 0.02 } },
         timeScale: { borderColor: '#1e2329', timeVisible: true },
     });
 
@@ -107,6 +136,18 @@ function initChart() {
         upColor: '#0ecb81', downColor: '#f6465d',
         borderUpColor: '#0ecb81', borderDownColor: '#f6465d',
         wickUpColor: '#0ecb81', wickDownColor: '#f6465d',
+    });
+
+    // Отключаем влияние маркеров на автошкалу
+    candleSeries.markers = () => ({
+        autoscaleInfo: () => null,
+        markers: () => [],
+    });
+
+    // Защита от выбросов при автообновлении шкалы
+    candleSeries.priceScale().applyOptions({
+        autoScale: true,
+        mode: 0, // Normal mode
     });
 
     ema65Series = chart.addLineSeries({
@@ -127,6 +168,167 @@ function initChart() {
     });
 }
 
+// Подключение к WebSocket ликвидаций (используем /market/)
+function connectLiquidationWebSocket() {
+    liquidationWs = new WebSocket(`${BINANCE_WS_MARKET}/!forceOrder@arr`);
+    
+    liquidationWs.onopen = () => {
+        console.log('Liquidation WebSocket connected');
+    };
+    
+    liquidationWs.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+        if (msg.e === 'forceOrder') {
+            processLiquidation(msg.o);
+        }
+    };
+    
+    liquidationWs.onclose = () => {
+        console.log('Liquidation WebSocket closed, reconnecting...');
+        setTimeout(connectLiquidationWebSocket, 5000);
+    };
+    
+    liquidationWs.onerror = (e) => {
+        console.error('Liquidation WS error:', e);
+    };
+}
+
+function loadSavedMarkers(symbol) {
+    const key = STORAGE_PREFIX + symbol;
+    const saved = localStorage.getItem(key);
+    if (saved) {
+        try {
+            return JSON.parse(saved);
+        } catch (e) {
+            console.error('Ошибка парсинга сохранённых маркеров:', e);
+            return [];
+        }
+    }
+    return [];
+}
+
+function saveMarkers(symbol, markers) {
+    const key = STORAGE_PREFIX + symbol;
+    try {
+        localStorage.setItem(key, JSON.stringify(markers));
+    } catch (e) {
+        console.error('Ошибка сохранения маркеров в localStorage:', e);
+        if (e.name === 'QuotaExceededError') {
+            const keys = Object.keys(localStorage).filter(k => k.startsWith(STORAGE_PREFIX));
+            keys.sort((a, b) => (localStorage.getItem(a)?.length || 0) - (localStorage.getItem(b)?.length || 0));
+            for (let i = 0; i < Math.min(5, keys.length); i++) {
+                localStorage.removeItem(keys[i]);
+            }
+            try {
+                localStorage.setItem(key, JSON.stringify(markers));
+            } catch (e2) {
+                console.error('Повторная ошибка сохранения');
+            }
+        }
+    }
+}
+
+// Обновление ленты ликвидаций в UI (добавлен onclick для перехода)
+function updateLiquidationFeed() {
+    const feedEl = document.getElementById('liquidationFeed');
+    if (!feedEl) return;
+    if (recentLiquidations.length === 0) {
+        feedEl.innerHTML = '<div style="color:#848e9c;text-align:center;">Ожидание ликвидаций...</div>';
+        return;
+    }
+    feedEl.innerHTML = recentLiquidations.map(liq => {
+        const sideClass = liq.side === 'SELL' ? 'liq-side-sell' : 'liq-side-buy';
+        const sideText = liq.side === 'SELL' ? 'LONG LIQ' : 'SHORT LIQ';
+        return `
+            <div class="liquidation-feed-item" onclick="selectCoin('${liq.symbol}')" title="Открыть график ${liq.symbol.replace('USDT','')}">
+                <span class="liq-symbol">${liq.symbol.replace('USDT', '')}</span>
+                <span class="${sideClass}">${sideText}</span>
+                <span class="liq-volume">${(liq.volume / 1000).toFixed(0)}K</span>
+                <span>${liq.price.toFixed(2)}</span>
+            </div>
+        `;
+    }).join('');
+}
+
+function processLiquidation(order) {
+    const symbol = order.s;
+    const price = parseFloat(order.p);
+    const quantity = parseFloat(order.q);
+    const volumeUSD = price * quantity;
+    
+    console.log(`[Liquidation] ${symbol} ${order.S} ${quantity.toFixed(4)} @ ${price.toFixed(2)} (vol: ${volumeUSD.toFixed(0)} USD)`);
+    
+    // Определяем порог для символа
+    let minVol = MIN_VOLUME_USD;
+    if (symbol === 'BTCUSDT') {
+        minVol = MIN_VOLUME_BTC;
+    } else if (symbol === 'ETHUSDT') {
+        minVol = MIN_VOLUME_ETH;
+    }
+    
+    if (volumeUSD < minVol) return;
+    
+    const side = order.S;
+    const timeMs = order.T;
+    const timeframeMs = getTimeframeMs(currentTimeframe);
+    const candleOpenTimeMs = Math.floor(timeMs / timeframeMs) * timeframeMs;
+    const timeSec = Math.floor(candleOpenTimeMs / 1000);
+    
+    const isLongLiquidation = (side === 'SELL');
+    
+    const marker = {
+        time: timeSec,
+        position: isLongLiquidation ? 'belowBar' : 'aboveBar',
+        color: side === 'SELL' ? '#f6465d' : '#0ecb81',
+        shape: 'circle',
+        text: `${(volumeUSD / 1000).toFixed(0)}K`,
+        size: 1,
+    };
+    
+    recentLiquidations.unshift({
+        symbol,
+        side,
+        volume: volumeUSD,
+        price,
+        time: timeMs
+    });
+    if (recentLiquidations.length > MAX_RECENT) recentLiquidations.pop();
+    updateLiquidationFeed();
+    
+    if (!allLiquidations.has(symbol)) {
+        allLiquidations.set(symbol, loadSavedMarkers(symbol));
+    }
+    const symbolMarkers = allLiquidations.get(symbol);
+    
+    const exists = symbolMarkers.some(m => m.time === marker.time && m.text === marker.text);
+    if (!exists) {
+        symbolMarkers.push(marker);
+        if (symbolMarkers.length > MAX_MARKERS_PER_SYMBOL) {
+            symbolMarkers.shift();
+        }
+        saveMarkers(symbol, symbolMarkers);
+    }
+    
+    if (symbol === currentSymbol) {
+        liquidationMarkers = symbolMarkers;
+        updateMarkersOnChart();
+        liquidationCount = liquidationMarkers.length;
+        updateStatusWithCount();
+    }
+}
+
+function updateMarkersOnChart() {
+    if (!candleSeries) return;
+    candleSeries.setMarkers(liquidationMarkers);
+}
+
+function updateStatusWithCount() {
+    const el = document.getElementById('connStatus');
+    if (el) {
+        el.textContent = `Connected (${liquidationCount} liq)`;
+    }
+}
+
 function calculateEMA(data, period) {
     if (data.length < period) return [];
     const ema = [];
@@ -144,16 +346,34 @@ function calculateEMA(data, period) {
 
 async function loadChartData(symbol) {
     try {
-        const res = await fetch(`${BINANCE_API}/fapi/v1/klines?symbol=${symbol}&interval=${currentTimeframe}&limit=1400`);
+        const res = await fetch(
+            `${BINANCE_API}/fapi/v1/klines?symbol=${symbol}&interval=${currentTimeframe}&limit=1400`
+        );
         const klines = await res.json();
+        
         currentCandles = klines.map(k => ({
             time: k[0] / 1000,
             open: parseFloat(k[1]), high: parseFloat(k[2]), low: parseFloat(k[3]), close: parseFloat(k[4]),
         }));
+        
         oldestTime = klines.length > 0 ? klines[0][0] : null;
+        
         candleSeries.setData(currentCandles);
         updateEmaLines(currentCandles);
         chart.timeScale().fitContent();
+        
+        // Принудительно сбрасываем масштаб после загрузки истории
+        const priceScale = candleSeries.priceScale();
+        priceScale.applyOptions({ autoScale: true });
+        
+        if (!allLiquidations.has(symbol)) {
+            allLiquidations.set(symbol, loadSavedMarkers(symbol));
+        }
+        liquidationMarkers = allLiquidations.get(symbol) || [];
+        updateMarkersOnChart();
+        liquidationCount = liquidationMarkers.length;
+        updateStatusWithCount();
+        
         if (wsReady) subscribeToKlineStream(symbol);
         updateHeader(symbol);
     } catch (e) {
@@ -187,6 +407,8 @@ async function loadMoreHistory() {
         currentCandles = [...newCandles, ...currentCandles];
         candleSeries.setData(currentCandles);
         updateEmaLines(currentCandles);
+        updateMarkersOnChart();
+        // Не сбрасываем масштаб при подгрузке истории
     } catch (e) {
         console.error('Ошибка подгрузки истории:', e);
     } finally {
@@ -197,7 +419,8 @@ async function loadMoreHistory() {
 }
 
 function connectWebSocket() {
-    ws = new WebSocket(BINANCE_WS);
+    // Подключаемся к market/ws и управляем подписками
+    ws = new WebSocket(BINANCE_WS_MARKET);
     ws.onopen = () => {
         wsReady = true;
         updateConnectionStatus(true);
@@ -261,18 +484,34 @@ function updateChartWithKline(data) {
         low: parseFloat(k.l),
         close: parseFloat(k.c)
     };
+    
+    // Простая фильтрация выбросов: если high/low слишком далеко от предыдущих значений — игнорируем обновление
     const lastCandle = currentCandles.length > 0 ? currentCandles[currentCandles.length - 1] : null;
+    
     if (!lastCandle) {
         currentCandles = [newCandle];
         candleSeries.setData(currentCandles);
     } else if (candleTime === lastCandle.time) {
+        // Обновляем текущую свечу, но с проверкой на реалистичность
+        const prevHigh = lastCandle.high;
+        const prevLow = lastCandle.low;
+        if (newCandle.high > prevHigh * 1.5 || newCandle.low < prevLow * 0.5) {
+            // Вероятно выброс, игнорируем это обновление
+            return;
+        }
         Object.assign(lastCandle, newCandle);
         candleSeries.update(newCandle);
     } else if (candleTime > lastCandle.time) {
         currentCandles.push(newCandle);
+        if (currentCandles.length > 1000) currentCandles.shift();
         candleSeries.update(newCandle);
     }
+    
+    // Обновляем EMA
     updateEmaLines(currentCandles);
+    
+    // НЕ вызываем автоматический пересчёт масштаба при каждом обновлении
+    // Это устраняет прыжки
 }
 
 function updateHeader(symbol) {
@@ -292,12 +531,10 @@ function formatPrice(p) {
     return p.toFixed(6);
 }
 
-// Функция обновления 30-минутных изменений
 async function refresh30mChanges() {
     const headerSpan = document.querySelector('#listHeader span[data-sort="change30m"]');
     const originalText = headerSpan.textContent;
     headerSpan.textContent = '⏳ 30м';
-
     const promises = filteredCoins.map(async (coin) => {
         try {
             const res = await fetch(`${BINANCE_API}/fapi/v1/klines?symbol=${coin.symbol}&interval=30m&limit=2`);
@@ -309,12 +546,9 @@ async function refresh30mChanges() {
                 const close = parseFloat(lastCandle[4]);
                 coin.change30m = ((close - open) / open) * 100;
             }
-        } catch (e) {
-            // оставляем старое значение
-        }
+        } catch (e) {}
         return coin;
     });
-
     await Promise.all(promises);
     headerSpan.textContent = originalText;
 }
@@ -326,9 +560,7 @@ function setupEvents() {
     document.querySelectorAll('#listHeader span').forEach(span => {
         span.addEventListener('click', async () => {
             const field = span.dataset.sort;
-            if (field === 'change30m') {
-                await refresh30mChanges();
-            }
+            if (field === 'change30m') await refresh30mChanges();
             sortBy(field);
         });
     });
@@ -380,11 +612,14 @@ function updateCoinRow(coin) {
     row.children[1].textContent = formatPrice(coin.price);
     row.children[2].textContent = `${coin.change >= 0 ? '+' : ''}${coin.change.toFixed(2)}%`;
     row.children[2].className = `coin-change ${coin.change >= 0 ? 'positive' : 'negative'}`;
-    // 30м не обновляется динамически, только по клику
 }
 
 function selectCoin(symbol) {
     currentSymbol = symbol;
+
+    // Мгновенно обновляем заголовок, не дожидаясь загрузки
+    document.getElementById('currentSymbol').textContent = symbol + ' (' + currentTimeframe + ')';
+
     document.querySelectorAll('.coin-item').forEach(el => {
         el.classList.toggle('active', el.dataset.symbol === symbol);
     });
@@ -398,7 +633,7 @@ function updateCoinsCount() {
 
 function updateConnectionStatus(ok) {
     const el = document.getElementById('connStatus');
-    el.textContent = ok ? 'Connected' : 'Disconnected';
+    el.textContent = ok ? `Connected (${liquidationCount} liq)` : 'Disconnected';
     el.className = 'connection-status ' + (ok ? 'status-connected' : 'status-disconnected');
 }
 
